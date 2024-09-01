@@ -3,19 +3,23 @@ from time import time
 import json
 from uuid import uuid4
 from flask import Flask, jsonify, request
-
-
+from urllib.parse import urlparse
+import requests
+from flask_cors import CORS
 class BlockChain:
     def __init__(self):
+        self.nodes = set()
         self.currentTransactions = []
         self.chain = []
         # Create the genesis block
         self.newBlock(proof=100, previousHash='1')
-
+    def registerNode(self, address):
+        parseURL = urlparse(address)
+        self.nodes.add(parseURL.netloc)
     def newBlock(self, proof, previousHash=None):
         block = {
             'index': len(self.chain) + 1,
-            'timeStamps': time(),
+            'timestamp': time(),
             'transactions': self.currentTransactions,
             'proof': proof,
             'previousHash': previousHash or self.hash(self.chain[-1])
@@ -42,6 +46,42 @@ class BlockChain:
         while self.validProof(lastProof, proof) is False:
             proof += 1
         return proof
+    def validChain(self, chain):
+        lastBlock = chain[0]
+        currentIndex = 1
+        while currentIndex < len(chain):
+            block = chain[currentIndex]
+            print(f'{lastBlock}')
+            print(f'{block}')
+            print("\n-----------\n")
+            if block['previousHash'] != self.hash(lastBlock):
+                return False
+            if not self.validProof(lastBlock['proof'], block['proof']):
+                return False
+            lastBlock = block
+            currentIndex += 1
+        return True
+    def resolveConflict(self):
+        neighbors = self.nodes
+        newChain = None
+        maxLen = len(self.chain)
+        for node in neighbors:
+            try:
+                response = requests.get(f'http://{node}/chain')
+                if 'length' in response.json() and 'chain' in response.json():
+                    length = response.json()['length']
+                    chain = response.json()['chain']
+                    if length > maxLen and self.validChain(chain):
+                        maxLen = length
+                        newChain = chain
+            except requests.exceptions.RequestException as e:
+                print(f'Error connecting to {node}: {e}')
+
+        if newChain:
+            self.chain = newChain
+            return True
+        return False
+
 
     @staticmethod
     def validProof(lastProof, proof):
@@ -55,6 +95,7 @@ class BlockChain:
 
 
 app = Flask(__name__)
+CORS(app) 
 nodeIdentifier = str(uuid4()).replace("-", "")
 blockChain = BlockChain()
 
@@ -105,6 +146,38 @@ def fullChain():
     }
     return jsonify(response), 200
 
+@app.route("/nodes/register", methods=["POST"])
+def selfRegister():
+    value= request.get_json()
+    nodes = value.get('nodes')
+    if nodes is None:
+        return "Error: Please supply a valid list of nodes", 400
+    for node in nodes:
+        blockChain.registerNode(node)
+    response = {
+        'message': 'New nodes have been added',
+        'total_nodes': list(blockChain.nodes),
+    }
+    return jsonify(response), 201
+
+@app.route('/nodes/resolve', methods=['GET'])
+def consensus():
+    replaced = blockChain.resolveConflict()  
+    if replaced:
+        response = {
+            'message': 'Our chain was replaced',
+            'new_chain': blockChain.chain
+        }
+    else:
+        response = {
+            'message': 'Our chain is authoritative',
+            'chain': blockChain.chain
+        }
+    return jsonify(response), 200
+
+
+
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=3000)
+  app.run(host='0.0.0.0', port=3000, threaded=True)
+
